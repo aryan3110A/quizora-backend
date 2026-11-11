@@ -1,0 +1,48 @@
+{
+  "name": "student-quiz-backend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests prisma",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "seed": "tsx prisma/seed.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.10.0",
+    "argon2": "^0.41.1",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "csv-parse": "^5.6.0",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "file-type": "^20.5.0",
+    "helmet": "^8.1.0",
+    "multer": "^2.0.0",
+    "pino": "^9.7.0",
+    "pino-http": "^10.4.0",
+    "xlsx": "^0.18.5",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.1",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.15.0",
+    "@types/supertest": "^6.0.2",
+    "prisma": "^6.19.3",
+    "supertest": "^7.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

@@ -1,0 +1,34 @@
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import cookieParser from "cookie-parser";
+import rateLimit from "express-rate-limit";
+import pinoHttp from "pino-http";
+import { env } from "./config/env";
+import { HttpError } from "./lib/http";
+import { authRouter } from "./routes/auth";
+import { studentRouter } from "./routes/student";
+import { adminRouter } from "./routes/admin";
+import { csrfProtection } from "./middleware/auth";
+
+export const app=express();
+app.disable("x-powered-by");
+app.use(helmet());
+app.use(cors({origin:env.FRONTEND_ORIGIN,credentials:true,allowedHeaders:["Content-Type","x-csrf-token"],exposedHeaders:["x-csrf-token"],methods:["GET","POST","PUT","PATCH","DELETE","OPTIONS"]}));
+app.use(express.json({limit:"1mb"}));
+app.use(cookieParser());
+app.use(pinoHttp({redact:["req.headers.cookie","req.headers.authorization","req.body.password"]}));
+app.get("/api/v1/health",csrfProtection,(_req,res)=>res.json({status:"ok",timestamp:new Date().toISOString()}));
+app.use("/api/v1/auth",rateLimit({windowMs:15*60_000,limit:50,standardHeaders:true,legacyHeaders:false}),authRouter);
+app.use("/api/v1",csrfProtection);
+app.use("/api/v1/student",studentRouter);
+app.use("/api/v1/admin",adminRouter);
+app.use((req,_res,next)=>next(new HttpError(404,"NOT_FOUND",`Route ${req.method} ${req.path} not found.`)));
+app.use((err:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{
+ if(err instanceof HttpError)return res.status(err.status).json({error:{code:err.code,message:err.message}});
+ const e=err as {status?:number;message?:string;name?:string};
+ if(e?.name==="ZodError")return res.status(400).json({error:{code:"VALIDATION_ERROR",message:"Request data is invalid."}});
+ if(e?.name==="MulterError")return res.status(e.message==="File too large"?413:400).json({error:{code:"UPLOAD_ERROR",message:"Upload rejected. Check file type and size."}});
+ if(e?.name==="PrismaClientKnownRequestError"&&(e as {code?:string}).code==="P2002")return res.status(409).json({error:{code:"CONFLICT",message:"A record with this information already exists."}});
+ res.status(500).json({error:{code:"INTERNAL_ERROR",message:env.NODE_ENV==="production"?"An unexpected error occurred.":(e?.message??"Unknown error")}});
+});
