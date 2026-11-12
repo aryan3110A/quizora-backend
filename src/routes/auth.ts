@@ -4,7 +4,7 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { newToken, sha256, requireAuth } from "../middleware/auth";
-import { env } from "../config/env";
+import { cookieSecure } from "../lib/cookies";
 
 export const authRouter=Router();
 const loginSchema=z.object({studentId:z.string().trim().min(1).max(80),password:z.string().min(1).max(256)});
@@ -15,8 +15,8 @@ authRouter.post("/login",asyncHandler(async(req,res)=>{
  const raw=newToken();const expiresAt=new Date(Date.now()+8*60*60*1000);
  await prisma.session.create({data:{tokenHash:sha256(raw),userId:user.id,expiresAt}});
  const csrf=newToken();
- res.cookie("quizora_session",raw,{httpOnly:true,secure:env.NODE_ENV==="production",sameSite:"lax",path:"/",expires:expiresAt});
- res.cookie("quizora_csrf",csrf,{httpOnly:false,secure:env.NODE_ENV==="production",sameSite:"lax",path:"/",expires:expiresAt});
+ res.cookie("quizora_session",raw,{httpOnly:true,secure:cookieSecure(req),sameSite:"lax",path:"/",expires:expiresAt});
+ res.cookie("quizora_csrf",csrf,{httpOnly:false,secure:cookieSecure(req),sameSite:"lax",path:"/",expires:expiresAt});
  res.setHeader("x-csrf-token",csrf);
  res.json({user:{id:user.id,studentId:user.studentId,fullName:user.fullName,role:user.role,streamId:user.streamId,mustChangePassword:user.mustChangePassword}});
 }));

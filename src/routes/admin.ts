@@ -7,12 +7,12 @@ import { prisma } from "../lib/prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth, requireAdmin } from "../middleware/auth";
 import { env } from "../config/env";
+import { getImportPreviewStore, IMPORT_PREVIEW_TTL_SECONDS, type ParsedQuestion } from "../services/importStore";
 
 export const adminRouter=Router();
 adminRouter.use(requireAuth,requireAdmin);
 const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:env.IMPORT_MAX_BYTES,files:1}});
-type ParsedQuestion={question:string;optionA:string;optionB:string;optionC:string;optionD:string;correctAnswer:"A"|"B"|"C"|"D";explanation?:string;topic?:string;marks:number;negativeMarks:number;difficulty?:string;row:number};
-const imports=new Map<string,{adminId:string;quizId:string;expires:number;questions:ParsedQuestion[]}>();
+// Import previews live in the shared store (Redis when configured, else process memory) — see services/importStore.ts.
 const quizSchema=z.object({title:z.string().trim().min(3).max(180),description:z.string().max(2000).optional(),startsAt:z.string().datetime(),endsAt:z.string().datetime(),durationMinutes:z.number().int().min(1).max(360),defaultMarks:z.number().positive().max(100),streamCodes:z.array(z.string().min(1)).min(1)});
 adminRouter.get("/dashboard",asyncHandler(async(_req,res)=>{
  const [students,quizzes,scheduled,attempts,recentQuizzes,streamsBreakdown,recentAttempts,publishedQuizzesCount,draftQuizzesCount]=await Promise.all([
@@ -137,26 +137,37 @@ adminRouter.post("/quizzes/:quizId/questions/import/preview",upload.single("file
  });
  const seen=new Set<string>();
  for(const q of questions){const key=q.question.toLowerCase().replace(/\s+/g," ");if(seen.has(key))errors.push({row:q.row,message:"Duplicate question text in this file."});seen.add(key);}
- const importId=randomUUID();imports.set(importId,{adminId:req.auth!.userId,quizId:quiz.id,expires:Date.now()+15*60_000,questions});
+ const importId=randomUUID();await getImportPreviewStore().put(importId,{adminId:req.auth!.userId,quizId:quiz.id,questions},IMPORT_PREVIEW_TTL_SECONDS);
  res.json({importId,validCount:questions.length,errors,questions:questions.map(q=>({question:q.question,optionA:q.optionA,optionB:q.optionB,optionC:q.optionC,optionD:q.optionD,correctAnswer:q.correctAnswer,topic:q.topic,explanation:q.explanation,marks:q.marks,row:q.row}))});
 }));
 adminRouter.post("/quizzes/:quizId/questions/import/confirm",asyncHandler(async(req,res)=>{
  const body=z.object({importId:z.string().uuid()}).safeParse(req.body);if(!body.success)throw new HttpError(400,"VALIDATION_ERROR","Invalid import ID.");
- const item=imports.get(body.data.importId);
+ const importId=body.data.importId;
  const quizId=String(req.params.quizId);
- if(!item||item.adminId!==req.auth!.userId||item.quizId!==quizId||item.expires<Date.now())throw new HttpError(400,"IMPORT_EXPIRED","Import preview expired. Upload the file again.");
- if(!item.questions.length)throw new HttpError(400,"NO_VALID_QUESTIONS","No valid questions to import.");
- const quiz=await prisma.quiz.findUnique({where:{id:item.quizId}});if(!quiz||quiz.status!=="DRAFT")throw new HttpError(409,"INVALID_STATE","Questions can only be imported into a draft quiz.");
- const imported=await prisma.$transaction(async tx=>{
-  const currentCount=await tx.question.count({where:{quizId:quiz.id}});
-  for(let i=0;i<item.questions.length;i++){
-   const q=item.questions[i];
-   await tx.question.create({data:{quizId:quiz.id,type:"SINGLE_SELECT",text:q.question,topic:q.topic,marks:q.marks,negativeMarks:q.negativeMarks,explanation:q.explanation,difficulty:q.difficulty,position:currentCount+i,options:{create:[q.optionA,q.optionB,q.optionC,q.optionD].map((text,j)=>({text,position:j,isCorrect:"ABCD"[j]===q.correctAnswer}))}}});
-  }
-  return item.questions.length;
- },{timeout:60000,maxWait:15000});
- imports.delete(body.data.importId);
- res.json({imported});
+ const store=getImportPreviewStore();
+ // Check ownership BEFORE consuming, so a wrong quiz/admin cannot burn someone else's preview.
+ const peek=await store.get(importId);
+ if(!peek||peek.adminId!==req.auth!.userId||peek.quizId!==quizId)throw new HttpError(400,"IMPORT_EXPIRED","Import preview expired. Upload the file again.");
+ // Atomic consume: of several concurrent confirms (double click, two instances) exactly one receives the preview.
+ const item=await store.take(importId);
+ if(!item)throw new HttpError(400,"IMPORT_EXPIRED","Import preview expired. Upload the file again.");
+ try{
+  if(!item.questions.length)throw new HttpError(400,"NO_VALID_QUESTIONS","No valid questions to import.");
+  const quiz=await prisma.quiz.findUnique({where:{id:item.quizId}});if(!quiz||quiz.status!=="DRAFT")throw new HttpError(409,"INVALID_STATE","Questions can only be imported into a draft quiz.");
+  const imported=await prisma.$transaction(async tx=>{
+   const currentCount=await tx.question.count({where:{quizId:quiz.id}});
+   for(let i=0;i<item.questions.length;i++){
+    const q=item.questions[i];
+    await tx.question.create({data:{quizId:quiz.id,type:"SINGLE_SELECT",text:q.question,topic:q.topic,marks:q.marks,negativeMarks:q.negativeMarks,explanation:q.explanation,difficulty:q.difficulty,position:currentCount+i,options:{create:[q.optionA,q.optionB,q.optionC,q.optionD].map((text,j)=>({text,position:j,isCorrect:"ABCD"[j]===q.correctAnswer}))}}});
+   }
+   return item.questions.length;
+  },{timeout:60000,maxWait:15000});
+  res.json({imported});
+ }catch(err){
+  // The import did not happen: give the preview back so the admin can retry without uploading again (as before).
+  await store.put(importId,item,IMPORT_PREVIEW_TTL_SECONDS).catch(()=>undefined);
+  throw err;
+ }
 }));
 adminRouter.post("/notifications",asyncHandler(async(req,res)=>{
  const body=z.object({title:z.string().trim().min(2).max(180),body:z.string().trim().min(2).max(4000),audienceType:z.enum(["ALL","STREAM"]),streamCode:z.string().optional()}).safeParse(req.body);
