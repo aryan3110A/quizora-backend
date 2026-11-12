@@ -1,0 +1,21 @@
+# Keep the build context small and keep secrets and host-built files OUT of every image layer.
+node_modules
+dist
+.git
+.github
+.vscode
+
+# secrets / local configuration: never copied into an image
+.env
+.env.*
+!.env.example
+
+# not needed to build or run
+tests
+templates
+coverage
+*.log
+*.md
+Dockerfile
+.dockerignore
+docker-compose*.yml

@@ -1,84 +1,45 @@
 import "dotenv/config";
-import argon2 from "argon2";
 import { prisma } from "../src/lib/prisma";
+import { MIN_SEED_PASSWORD_LENGTH, seedDatabase } from "./seedLogic";
 
+/**
+ * Development seed. Credentials come ONLY from the environment and are never printed:
+ *   ADMIN_SEED_PASSWORD      creates ADMIN001 when set (min 12 chars)
+ *   SEED_STUDENT_PASSWORD    creates the development students when set (min 12 chars); they must change it on first login
+ *   SEED_STUDENT_PREFIX / SEED_STUDENT_DOMAIN / SEED_STUDENT_COUNT / SEED_STUDENT_STREAM   optional (26MCE / nirmauni.ac.in / 32 / MCE)
+ *   SEED_STUDENTS_IN_PRODUCTION=true   required to seed students when NODE_ENV=production
+ * Re-running is safe: existing records are never modified.
+ */
 async function main() {
-  const cse = await prisma.stream.upsert({
-    where: { code: "CSE" },
-    update: { name: "Computer Science and Engineering" },
-    create: { code: "CSE", name: "Computer Science and Engineering" }
-  });
-  await prisma.stream.upsert({
-    where: { code: "DS" },
-    update: { name: "Data Science" },
-    create: { code: "DS", name: "Data Science" }
-  });
-  await prisma.stream.upsert({
-    where: { code: "CYBER" },
-    update: { name: "Cybersecurity" },
-    create: { code: "CYBER", name: "Cybersecurity" }
-  });
-  await prisma.stream.upsert({
-    where: { code: "CS" },
-    update: { name: "Computer Science" },
-    create: { code: "CS", name: "Computer Science" }
-  });
-  const mce = await prisma.stream.upsert({
-    where: { code: "MCE" },
-    update: { name: "Master of Computer Engineering" },
-    create: { code: "MCE", name: "Master of Computer Engineering" }
-  });
-
-  const adminPassword = process.env.ADMIN_SEED_PASSWORD;
-  if (adminPassword && adminPassword.length >= 12) {
-    await prisma.user.upsert({
-      where: { studentId: "ADMIN001" },
-      update: {},
-      create: {
-        studentId: "ADMIN001",
-        fullName: "System Administrator",
-        role: "ADMIN",
-        passwordHash: await argon2.hash(adminPassword),
-        mustChangePassword: true
-      }
-    });
-    console.log("Seeded ADMIN001.");
-  } else {
-    console.log("Streams seeded. Set ADMIN_SEED_PASSWORD (12+ characters) to create the initial admin.");
+  const studentPassword = process.env.SEED_STUDENT_PASSWORD;
+  if (studentPassword && process.env.NODE_ENV === "production" && process.env.SEED_STUDENTS_IN_PRODUCTION !== "true") {
+    throw new Error("Refusing to seed development students with NODE_ENV=production (set SEED_STUDENTS_IN_PRODUCTION=true to override).");
   }
-
-  // Seed students 26MCE001@nirmauni.ac.in through 26MCE032@nirmauni.ac.in
-  console.log("Seeding students 26MCE001@nirmauni.ac.in to 26MCE032@nirmauni.ac.in...");
-  for (let i = 1; i <= 32; i++) {
-    const num = String(i).padStart(3, "0");
-    const studentId = `26MCE${num}@nirmauni.ac.in`;
-    const initialPassword = studentId;
-    const passwordHash = await argon2.hash(initialPassword);
-
-    await prisma.user.upsert({
-      where: { studentId },
-      update: {
-        fullName: `Student 26MCE${num}`,
-        streamId: mce.id,
-        isActive: true
-      },
-      create: {
-        studentId,
-        fullName: `Student 26MCE${num}`,
-        role: "STUDENT",
-        streamId: mce.id,
-        passwordHash,
-        mustChangePassword: true,
-        isActive: true
-      }
-    });
+  if (studentPassword && studentPassword.length < MIN_SEED_PASSWORD_LENGTH) {
+    throw new Error(`SEED_STUDENT_PASSWORD must be at least ${MIN_SEED_PASSWORD_LENGTH} characters.`);
   }
-  console.log("Successfully seeded 32 students (26MCE001@nirmauni.ac.in - 26MCE032@nirmauni.ac.in) with stream MCE and initial password = student ID.");
+  const count = Number(process.env.SEED_STUDENT_COUNT ?? 32);
+  if (!Number.isInteger(count) || count < 1 || count > 500) throw new Error("SEED_STUDENT_COUNT must be an integer between 1 and 500.");
+
+  await seedDatabase(prisma, {
+    adminPassword: process.env.ADMIN_SEED_PASSWORD || undefined,
+    students: studentPassword
+      ? {
+          password: studentPassword,
+          prefix: process.env.SEED_STUDENT_PREFIX ?? "26MCE",
+          domain: process.env.SEED_STUDENT_DOMAIN ?? "nirmauni.ac.in",
+          count,
+          streamCode: process.env.SEED_STUDENT_STREAM ?? "MCE"
+        }
+      : undefined,
+    log: (message) => console.log(message)
+  });
 }
 
 main()
-  .catch(e => {
-    console.error(e);
+  .catch((e: unknown) => {
+    // Print the message only: error objects can carry connection details.
+    console.error(e instanceof Error ? e.message : "Seed failed.");
     process.exit(1);
   })
   .finally(() => prisma.$disconnect());

@@ -1,20 +1,89 @@
 name: Backend CI
+
 on:
   push:
   pull_request:
+
+# CI only reads the repository. No secrets are used anywhere in this workflow.
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the run that is still in progress.
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Throw-away services that exist only for this job. They are the ONLY database and cache CI ever talks to.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: quizora
+          POSTGRES_PASSWORD: ci_only_not_a_secret
+          POSTGRES_DB: quizora_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U quizora -d quizora_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Opt-in test infrastructure. tests/setup/safety.ts refuses anything but a LOCAL database whose name ends in `_test`
+      # and a LOCAL Redis, and vitest.config.ts never lets DATABASE_URL / REDIS_URL from a .env file reach the tests.
+      TEST_DATABASE_URL: postgresql://quizora:ci_only_not_a_secret@localhost:5432/quizora_test
+      TEST_REDIS_URL: redis://localhost:6379
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm install
-      - run: npx prisma validate
+
+      - name: Guard - no production database or cloud host names in the code
+        # Neon / RDS / ElastiCache hostnames must never be committed. Tests may mention them as negative examples.
+        run: |
+          if git grep -nEi 'neon\.tech|rds\.amazonaws\.com|cache\.amazonaws\.com' -- . ':!tests' ':!*.md' ':!package-lock.json'; then
+            echo "A production-looking host name was found. CI must never be pointed at a real database." >&2
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
         env:
           DATABASE_URL: postgresql://example:example@localhost:5432/example
           DIRECT_URL: postgresql://example:example@localhost:5432/example
+
       - run: npm run typecheck
-      - run: npm test
+
+      # The test run's global setup applies the migrations (`prisma migrate deploy`) to the empty quizora_test database first,
+      # so this also proves the migrations can build a fresh PostgreSQL database. Unit + integration tests, Postgres + Redis.
+      - name: Tests (unit and integration)
+        run: npm test
+
+      - run: npm run build
+
+      # Smoke-test that the production images still build (runtime = API/worker, migrate = release job). Nothing is pushed.
+      - name: Docker images build
+        run: |
+          docker build --target runtime -t quizora-backend:ci .
+          docker build --target migrate -t quizora-migrate:ci .
