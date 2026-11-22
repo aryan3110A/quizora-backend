@@ -35,4 +35,9 @@ sed -i 's/^AUTO_DEPLOY=false/AUTO_DEPLOY=true/' "$APP/deploy.conf"
 QUIZORA_DIR="$APP" bash /tmp/d/server/install.sh > /tmp/install2.out 2>&1; check "second run exit code" "$?" 0
 check "user's AUTO_DEPLOY=true survived" "$(grep ^AUTO_DEPLOY= "$APP/deploy.conf")" "AUTO_DEPLOY=true"
 check "no extra backup of identical compose" "$(backups)" 1
+echo "-- an empty deploy.conf left by an interrupted earlier run is regenerated"
+: > "$APP/deploy.conf"
+QUIZORA_DIR="$APP" bash /tmp/d/server/install.sh > /tmp/install3.out 2>&1; check "third run exit code" "$?" 0
+check "empty deploy.conf regenerated with the branch" "$(grep ^BACKEND_BRANCH= "$APP/deploy.conf")" "BACKEND_BRANCH=ci/aws-deploy"
+check "regenerated file is not empty" "$([ -s "$APP/deploy.conf" ] && echo yes)" yes
 echo; echo "passed: $pass  failed: $fail"; [ "$fail" -eq 0 ]

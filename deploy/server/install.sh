@@ -24,8 +24,8 @@ place() { # <source> <destination>
 place "$DIR/docker-compose.yml" "$APP_DIR/docker-compose.yml"
 place "$DIR/proxy/nginx.conf" "$APP_DIR/proxy/nginx.conf"
 
-# deploy.conf: create once; never overwrite your choices
-if [ ! -f "$APP_DIR/deploy.conf" ]; then
+# deploy.conf: create once; never overwrite your choices. An EMPTY file (left behind by an interrupted earlier run) counts as missing.
+if [ ! -s "$APP_DIR/deploy.conf" ]; then
   backend_branch="$(sudo -u ubuntu git -C "$APP_DIR/student-quiz-backend" branch --show-current 2> /dev/null || echo main)"
   frontend_branch="$(sudo -u ubuntu git -C "$APP_DIR/student-quiz-frontend" branch --show-current 2> /dev/null || echo main)"
   # awk, not sed: branch names contain "/" (for example ci/aws-deploy), which would break an s/// expression
