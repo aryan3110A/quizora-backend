@@ -15,8 +15,9 @@ concurrency:
 
 jobs:
   check:
+    name: check (typecheck, tests, build, images)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     # Throw-away services that exist only for this job. They are the ONLY database and cache CI ever talks to.
     services:
@@ -87,3 +88,35 @@ jobs:
         run: |
           docker build --target runtime -t quizora-backend:ci .
           docker build --target migrate -t quizora-migrate:ci .
+
+      - name: Runtime image is non-root and has no build tooling
+        run: |
+          test "$(docker run --rm --entrypoint id quizora-backend:ci -un)" = "node"
+          ! docker run --rm --entrypoint sh quizora-backend:ci -c 'ls node_modules/.bin | grep -E "^(tsc|prisma)$"'
+
+  deploy-tooling:
+    name: deploy-tooling (scripts, gate, auto-stop, compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck the server scripts
+        run: shellcheck -s bash -S style deploy/server/*.sh deploy/aws/auto-stop/*.sh
+
+      - name: CI-gate tests (decides whether a commit may be deployed)
+        working-directory: deploy/server
+        run: python3 -m unittest -v test_ci_gate
+
+      - name: Auto-stop Lambda tests
+        working-directory: deploy/aws/auto-stop
+        run: python3 -m unittest -v test_auto_stop
+
+      - name: Origin-sync script tests (run on Ubuntu, like the server)
+        run: bash deploy/server/test_origin_sync.sh
+
+      - name: Production compose file is valid
+        working-directory: deploy/server
+        run: |
+          touch .env
+          docker compose -f docker-compose.yml config -q

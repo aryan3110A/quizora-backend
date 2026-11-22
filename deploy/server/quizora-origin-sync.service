@@ -1,0 +1,16 @@
+[Unit]
+Description=Quizora: set FRONTEND_ORIGIN to this instance's current public IP, then recreate backend/worker
+# Docker must be running (the script recreates containers). Network must be up (the script asks the EC2 metadata service).
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/quizora-origin-sync --apply
+RemainAfterExit=yes
+TimeoutStartSec=300
+# the script logs with `logger` (journalctl -u quizora-origin-sync) and never prints secrets
+
+[Install]
+WantedBy=multi-user.target

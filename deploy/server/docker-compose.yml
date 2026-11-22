@@ -1,0 +1,86 @@
+# Quizora - PRODUCTION compose file for the EC2 instance (lives at ~/quizora/docker-compose.yml; installed by deploy/server/install.sh).
+# Layout on the server:  ~/quizora/{docker-compose.yml, .env, deploy.conf, proxy/nginx.conf, student-quiz-backend/, student-quiz-frontend/}
+#
+# Secrets: NOTHING secret is in this file. Everything comes from ~/quizora/.env (mode 600, never committed).
+# Images have explicit names so quizora-deploy can keep a ":rollback" copy of the previous version of each.
+# The worker runs the SAME image as the API (one build, one image), with a different command.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"   # Docker's default is unlimited: container logs could slowly fill the 20 GiB disk
+    max-file: "3"
+
+services:
+  # one-shot: applies database migrations and exits. quizora-deploy runs it explicitly BEFORE swapping the containers.
+  migrate:
+    image: quizora-migrate:latest
+    build:
+      context: ./student-quiz-backend
+      target: migrate
+    env_file: .env
+    restart: "no"
+    logging: *default-logging
+
+  backend:
+    image: quizora-backend:latest
+    build:
+      context: ./student-quiz-backend
+      target: runtime
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      TRUST_PROXY_HOPS: "1"
+      COOKIE_SECURE: "false"
+      DB_CONNECTION_LIMIT: "5"
+      DB_POOL_TIMEOUT_SECONDS: "10"
+    expose:
+      - "4000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    logging: *default-logging
+
+  worker:
+    image: quizora-backend:latest
+    command: ["node", "dist/src/worker.js"]
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      TRUST_PROXY_HOPS: "1"
+      DB_CONNECTION_LIMIT: "2"
+      DB_POOL_TIMEOUT_SECONDS: "10"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      disable: true   # no HTTP port; supervised by the restart policy
+    restart: unless-stopped
+    logging: *default-logging
+
+  frontend:
+    image: quizora-frontend:latest
+    build:
+      context: ./student-quiz-frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: /api/v1
+    expose:
+      - "3000"
+    restart: unless-stopped
+    logging: *default-logging
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./proxy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging

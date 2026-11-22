@@ -1,0 +1,10 @@
+[Unit]
+Description=Check GitHub for a new Quizora version every 5 minutes (acts only when AUTO_DEPLOY=true in deploy.conf)
+
+[Timer]
+OnBootSec=4min
+OnUnitInactiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

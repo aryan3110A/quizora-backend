@@ -4,6 +4,7 @@ dist
 .git
 .github
 .vscode
+deploy
 
 # secrets / local configuration: never copied into an image
 .env
