@@ -3,7 +3,9 @@
 #   docker run --rm -v "<repo>/deploy:/mnt:ro" ubuntu:24.04 bash /mnt/server/test_install.sh
 set -u
 export DEBIAN_FRONTEND=noninteractive
-command -v git > /dev/null && command -v sudo > /dev/null || { apt-get update -qq > /dev/null && apt-get install -y -qq git sudo > /dev/null; }
+if ! command -v git > /dev/null || ! command -v sudo > /dev/null; then
+  apt-get update -qq > /dev/null && apt-get install -y -qq git sudo > /dev/null
+fi
 id ubuntu > /dev/null 2>&1 || useradd -m ubuntu
 cp -r /mnt /tmp/d
 APP=/tmp/app; mkdir -p "$APP/student-quiz-backend" "$APP/student-quiz-frontend"; chown -R ubuntu:ubuntu "$APP"
@@ -22,7 +24,8 @@ check "auto deploy is OFF by default" "$(grep ^AUTO_DEPLOY= "$APP/deploy.conf")"
 check "CI gate required by default" "$(grep ^REQUIRE_CI= "$APP/deploy.conf")" "REQUIRE_CI=true"
 check "deploy script installed and executable" "$([ -x /usr/local/bin/quizora-deploy ] && echo yes)" yes
 check "gate script installed" "$([ -f /usr/local/lib/quizora/ci_gate.py ] && echo yes)" yes
-check "old compose backed up" "$(ls "$APP"/docker-compose.yml.bak.* 2>/dev/null | wc -l | tr -d ' ')" 1
+backups() { find "$APP" -maxdepth 1 -name 'docker-compose.yml.bak.*' | wc -l | tr -d ' '; }
+check "old compose backed up" "$(backups)" 1
 check "new compose in place" "$(grep -c 'quizora-backend:latest' "$APP/docker-compose.yml" | tr -d ' ')" 2
 check "nginx config in place" "$([ -f "$APP/proxy/nginx.conf" ] && echo yes)" yes
 check "timer enabled+started" "$(grep -c 'enable --now quizora-deploy.timer' /tmp/systemctl.log)" 1
@@ -31,5 +34,5 @@ echo "-- second run: must not overwrite the user's deploy.conf, and must not bac
 sed -i 's/^AUTO_DEPLOY=false/AUTO_DEPLOY=true/' "$APP/deploy.conf"
 QUIZORA_DIR="$APP" bash /tmp/d/server/install.sh > /tmp/install2.out 2>&1; check "second run exit code" "$?" 0
 check "user's AUTO_DEPLOY=true survived" "$(grep ^AUTO_DEPLOY= "$APP/deploy.conf")" "AUTO_DEPLOY=true"
-check "no extra backup of identical compose" "$(ls "$APP"/docker-compose.yml.bak.* | wc -l | tr -d ' ')" 1
+check "no extra backup of identical compose" "$(backups)" 1
 echo; echo "passed: $pass  failed: $fail"; [ "$fail" -eq 0 ]
