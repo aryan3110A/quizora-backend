@@ -28,7 +28,8 @@ place "$DIR/proxy/nginx.conf" "$APP_DIR/proxy/nginx.conf"
 if [ ! -f "$APP_DIR/deploy.conf" ]; then
   backend_branch="$(sudo -u ubuntu git -C "$APP_DIR/student-quiz-backend" branch --show-current 2> /dev/null || echo main)"
   frontend_branch="$(sudo -u ubuntu git -C "$APP_DIR/student-quiz-frontend" branch --show-current 2> /dev/null || echo main)"
-  sed -e "s/^BACKEND_BRANCH=.*/BACKEND_BRANCH=${backend_branch:-main}/" -e "s/^FRONTEND_BRANCH=.*/FRONTEND_BRANCH=${frontend_branch:-main}/" "$DIR/deploy.conf.example" > "$APP_DIR/deploy.conf"
+  # awk, not sed: branch names contain "/" (for example ci/aws-deploy), which would break an s/// expression
+  awk -v b="${backend_branch:-main}" -v f="${frontend_branch:-main}" '/^BACKEND_BRANCH=/ {print "BACKEND_BRANCH=" b; next} /^FRONTEND_BRANCH=/ {print "FRONTEND_BRANCH=" f; next} {print}' "$DIR/deploy.conf.example" > "$APP_DIR/deploy.conf"
   chown ubuntu:ubuntu "$APP_DIR/deploy.conf"; chmod 644 "$APP_DIR/deploy.conf"
   echo "created $APP_DIR/deploy.conf (branches: backend=$backend_branch frontend=$frontend_branch, AUTO_DEPLOY=false)"
 fi

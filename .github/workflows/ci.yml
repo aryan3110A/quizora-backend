@@ -115,6 +115,9 @@ jobs:
       - name: Origin-sync script tests (run on Ubuntu, like the server)
         run: bash deploy/server/test_origin_sync.sh
 
+      - name: Installer test (throw-away Ubuntu container, fake app folder, stub systemctl)
+        run: docker run --rm -v "$PWD/deploy:/mnt:ro" ubuntu:24.04 bash /mnt/server/test_install.sh
+
       - name: Production compose file is valid
         working-directory: deploy/server
         run: |
