@@ -31,7 +31,11 @@ FROM base AS prod-deps
 COPY package.json package-lock.json ./
 # `prisma` and `typescript` are direct dev dependencies AND optional peers of @prisma/client, so npm keeps them even with --omit=dev.
 # The runtime needs only the generated client (copied from the build stage), not the CLI, its engines or the compiler: drop them.
-RUN npm ci --omit=dev && npm cache clean --force \n && rm -rf node_modules/prisma node_modules/typescript node_modules/effect \n    node_modules/@prisma/engines node_modules/@prisma/config node_modules/@prisma/fetch-engine \n    node_modules/@prisma/get-platform node_modules/@prisma/engines-version node_modules/@prisma/debug \n && rm -f node_modules/.bin/prisma node_modules/.bin/tsc node_modules/.bin/tsserver
+RUN npm ci --omit=dev && npm cache clean --force \
+    && rm -rf node_modules/prisma node_modules/typescript node_modules/effect \
+       node_modules/@prisma/engines node_modules/@prisma/config node_modules/@prisma/fetch-engine \
+       node_modules/@prisma/get-platform node_modules/@prisma/engines-version node_modules/@prisma/debug \
+    && rm -f node_modules/.bin/prisma node_modules/.bin/tsc node_modules/.bin/tsserver
 
 # 4) migration job: build stage + CLI + migrations. Runs `prisma migrate deploy`, then exits.
 FROM build AS migrate
