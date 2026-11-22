@@ -115,6 +115,9 @@ jobs:
       - name: Origin-sync script tests (run on Ubuntu, like the server)
         run: bash deploy/server/test_origin_sync.sh
 
+      - name: Deploy-script tests (real git, stubbed docker and CI gate; every refusal and rollback path)
+        run: docker run --rm -v "$PWD/deploy:/mnt:ro" ubuntu:24.04 bash /mnt/server/test_deploy.sh
+
       - name: Installer test (throw-away Ubuntu container, fake app folder, stub systemctl)
         run: docker run --rm -v "$PWD/deploy:/mnt:ro" ubuntu:24.04 bash /mnt/server/test_install.sh
 

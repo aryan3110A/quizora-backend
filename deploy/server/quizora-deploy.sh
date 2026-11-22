@@ -74,20 +74,23 @@ cid_of() { docker compose ps -q "$1" < /dev/null 2> /dev/null | head -1; }
 health_of() { local c; c="$(cid_of "$1")"; [ -n "$c" ] && docker inspect -f '{{.State.Health.Status}}' "$c" 2> /dev/null; }
 
 wait_healthy() { # waits for container health + HTTP checks through nginx
-  local waited=0
-  while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do
+  # The deadline uses the shell's real-time clock ($SECONDS), not a running total of sleeps, so it cannot be skipped or looped forever
+  # whatever the poll interval is (a poll interval of 0 would otherwise never reach the timeout).
+  local deadline=$((SECONDS + HEALTH_TIMEOUT))
+  while [ "$SECONDS" -lt "$deadline" ]; do
     if [ "$(health_of backend)" = "healthy" ] && [ "$(health_of frontend)" = "healthy" ] \
       && [ "$(http_code "$HEALTH_URL/health/ready")" = "200" ] && [ "$(http_code "$HEALTH_URL/login")" = "200" ] \
       && [ "$(http_code "$HEALTH_URL/api/v1/health")" = "200" ]; then
       return 0
     fi
-    sleep "$POLL"; waited=$((waited + POLL))
+    sleep "$POLL"
   done
   return 1
 }
 
 recreate_all() {
-  docker compose up -d --no-deps --remove-orphans backend worker frontend < /dev/null || return 1
+  # nginx is included so a changed compose/nginx configuration (for example log rotation) is applied; it is only recreated if it changed
+  docker compose up -d --no-deps --remove-orphans backend worker frontend nginx < /dev/null || return 1
   docker compose restart nginx < /dev/null || return 1
 }
 
