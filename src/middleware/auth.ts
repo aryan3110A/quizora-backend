@@ -3,6 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { prisma } from "../lib/prisma";
 import { HttpError } from "../lib/http";
 import { env } from "../config/env";
+import { cookieSecure } from "../lib/cookies";
 
 export function sha256(value: string) { return createHash("sha256").update(value).digest("hex"); }
 export function requireAuth(req: Request,res: Response,next: NextFunction) {
@@ -26,7 +27,7 @@ export function csrfProtection(req: Request,res: Response,next: NextFunction) {
       token = newToken();
       res.cookie("quizora_csrf", token, {
         httpOnly: false,
-        secure: env.NODE_ENV === "production",
+        secure: cookieSecure(req),
         sameSite: "lax",
         path: "/",
         expires: new Date(Date.now() + 8 * 60 * 60 * 1000)

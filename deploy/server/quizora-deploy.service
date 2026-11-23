@@ -1,0 +1,15 @@
+[Unit]
+Description=Quizora automatic deployment (checks GitHub; deploys only commits whose CI passed; rolls back on failure)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/local/bin/quizora-deploy --auto
+# a build on a t3.micro can take several minutes
+TimeoutStartSec=1800
+# exit code 3 = "CI not finished yet, will retry"; that is not a failure
+SuccessExitStatus=3

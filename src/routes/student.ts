@@ -4,10 +4,13 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { asyncHandler, HttpError } from "../lib/http";
 import { requireAuth } from "../middleware/auth";
+import { getAttemptStatus, getDbNow, isUuid, saveAttemptAnswer, submitAttempt } from "../services/attempts";
 
 export const studentRouter=Router();
 studentRouter.use(requireAuth);
 function now(){return new Date();}
+// Per-question answer sequence numbers (BigInt in the DB) as plain numbers, so a reloaded client can continue its sequence.
+function answerSeqsOf(answers:Array<{questionId:string;clientSeq:bigint|null}>){return Object.fromEntries(answers.filter(a=>a.clientSeq!==null).map(a=>[a.questionId,Number(a.clientSeq)]));}
 function isReleased(quizEndsAt:Date, finalizedAt:Date|null){return now()>=quizEndsAt && !!finalizedAt;}
 studentRouter.get("/dashboard",asyncHandler(async(req,res)=>{
  const user=await prisma.user.findUnique({where:{id:req.auth!.userId},include:{stream:true}});
@@ -67,7 +70,8 @@ studentRouter.post("/quizzes/:quizId/attempts",asyncHandler(async(req,res)=>{
  if(attempt.status!=="IN_PROGRESS")throw new HttpError(409,"ATTEMPT_FINALIZED","This attempt has already been submitted.");
  if(current>=attempt.deadlineAt)throw new HttpError(409,"ATTEMPT_EXPIRED","The deadline has passed.");
  const answers=Object.fromEntries(attempt.answers.map(a=>[a.questionId,a.selectedOptionId]));
- res.json({id:attempt.id,title:quiz.title,deadlineAt:attempt.deadlineAt,answers,questions:attempt.questions.map(a=>({id:a.questionId,text:a.question.text,type:a.question.type,position:a.displayOrder,marks:a.question.marks,options:(a.optionOrderSnapshot as string[]).map(id=>a.question.options.find(o=>o.id===id)).filter(Boolean).map(o=>({id:o!.id,text:o!.text,position:o!.position}))}))});
+ // serverTime is the database clock (the clock deadlines are enforced on): clients derive their countdown from it, not from their own clock.
+ res.json({id:attempt.id,title:quiz.title,deadlineAt:attempt.deadlineAt,serverTime:await getDbNow(),answers,answerSeqs:answerSeqsOf(attempt.answers),questions:attempt.questions.map(a=>({id:a.questionId,text:a.question.text,type:a.question.type,position:a.displayOrder,marks:a.question.marks,options:(a.optionOrderSnapshot as string[]).map(id=>a.question.options.find(o=>o.id===id)).filter(Boolean).map(o=>({id:o!.id,text:o!.text,position:o!.position}))}))});
 }));
 studentRouter.get("/attempts/:attemptId",asyncHandler(async(req,res)=>{
  const attemptId=String(req.params.attemptId);
@@ -75,13 +79,16 @@ studentRouter.get("/attempts/:attemptId",asyncHandler(async(req,res)=>{
  if(!attempt)throw new HttpError(404,"ATTEMPT_NOT_FOUND","Attempt not found.");
  if(attempt.status!=="IN_PROGRESS")throw new HttpError(409,"ATTEMPT_FINALIZED","This attempt is no longer active.");
  if(now()>=attempt.deadlineAt)throw new HttpError(409,"ATTEMPT_EXPIRED","The deadline has passed.");
- res.json({id:attempt.id,title:attempt.quiz.title,deadlineAt:attempt.deadlineAt,answers:Object.fromEntries(attempt.answers.map(a=>[a.questionId,a.selectedOptionId])),questions:attempt.questions.map(a=>({id:a.questionId,text:a.question.text,type:a.question.type,position:a.displayOrder,marks:a.question.marks,options:(a.optionOrderSnapshot as string[]).map(id=>a.question.options.find(o=>o.id===id)).filter(Boolean).map(o=>({id:o!.id,text:o!.text,position:o!.position}))}))});
+ res.json({id:attempt.id,title:attempt.quiz.title,deadlineAt:attempt.deadlineAt,serverTime:await getDbNow(),answers:Object.fromEntries(attempt.answers.map(a=>[a.questionId,a.selectedOptionId])),answerSeqs:answerSeqsOf(attempt.answers),questions:attempt.questions.map(a=>({id:a.questionId,text:a.question.text,type:a.question.type,position:a.displayOrder,marks:a.question.marks,options:(a.optionOrderSnapshot as string[]).map(id=>a.question.options.find(o=>o.id===id)).filter(Boolean).map(o=>({id:o!.id,text:o!.text,position:o!.position}))}))});
 }));
 studentRouter.put("/attempts/:attemptId/answers/:questionId",asyncHandler(async(req,res)=>{
- const body=z.object({selectedOptionId:z.string().uuid().nullable().optional()}).safeParse(req.body);
+ // seq: per-question increasing number chosen by the client (optional so legacy clients keep working). See saveAttemptAnswer.
+ const body=z.object({selectedOptionId:z.string().uuid().nullable().optional(),seq:z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional()}).safeParse(req.body);
  if(!body.success)throw new HttpError(400,"VALIDATION_ERROR","Invalid answer payload.");
  const attemptId=String(req.params.attemptId);
  const questionId=String(req.params.questionId);
+ if(!isUuid(attemptId))throw new HttpError(404,"ATTEMPT_NOT_FOUND","Attempt not found.");
+ if(!isUuid(questionId))throw new HttpError(404,"QUESTION_NOT_FOUND","Question not found.");
  const attempt=await prisma.attempt.findFirst({where:{id:attemptId,userId:req.auth!.userId},include:{quiz:true}});
  if(!attempt)throw new HttpError(404,"ATTEMPT_NOT_FOUND","Attempt not found.");
  if(attempt.status!=="IN_PROGRESS"||now()>=attempt.deadlineAt||now()>=attempt.quiz.endsAt)throw new HttpError(409,"ATTEMPT_CLOSED","This attempt is closed.");
@@ -89,40 +96,42 @@ studentRouter.put("/attempts/:attemptId/answers/:questionId",asyncHandler(async(
  if(!question)throw new HttpError(404,"QUESTION_NOT_FOUND","Question not found.");
  const optionId=body.data.selectedOptionId??null;
  if(optionId&&!question.options.some(o=>o.id===optionId))throw new HttpError(400,"INVALID_OPTION","Selected option does not belong to this question.");
- await prisma.attemptAnswer.upsert({where:{attemptId_questionId:{attemptId:attempt.id,questionId:question.id}},create:{attemptId:attempt.id,questionId:question.id,selectedOptionId:optionId},update:{selectedOptionId:optionId}});
- res.json({ok:true,attemptId:attempt.id,questionId:question.id,savedAt:now().toISOString()});
+ // The checks above are a fast path. The authoritative check is inside saveAttemptAnswer: one statement that
+ // locks the attempt row (FOR SHARE), re-verifies IN_PROGRESS + deadline on the database clock, then upserts.
+ // This closes the race with submit/finalization: an answer can never be written after scoring has started.
+ const saved=await saveAttemptAnswer({attemptId:attempt.id,userId:req.auth!.userId,questionId:question.id,selectedOptionId:optionId,clientSeq:body.data.seq});
+ if(saved.kind==="CLOSED")throw new HttpError(409,"ATTEMPT_CLOSED","This attempt is closed.");
+ if(saved.kind==="STALE"){
+  // A newer answer for this question is already stored: reject the older request and tell the client what is stored.
+  res.status(409).json({error:{code:"STALE_ANSWER",message:"A newer answer for this question was already saved."},current:{selectedOptionId:saved.current.selectedOptionId,seq:saved.current.clientSeq}});return;
+ }
+ res.json({ok:true,attemptId:attempt.id,questionId:question.id,savedAt:now().toISOString(),serverTime:saved.now,applied:saved.kind==="SAVED"});
 }));
-async function finalizeAttempt(attemptId:string,userId:string){
- return prisma.$transaction(async tx=>{
-  const a=await tx.attempt.findFirst({where:{id:attemptId,userId},include:{quiz:{include:{questions:{include:{options:true}}}},answers:true}});
-  if(!a)throw new HttpError(404,"ATTEMPT_NOT_FOUND","Attempt not found.");
-  if(a.finalizedAt)return a;
-  const current=now();
-  if(a.status==="IN_PROGRESS"&&current<a.deadlineAt&&current<a.quiz.endsAt)throw new HttpError(409,"QUIZ_NOT_CLOSED","The quiz attempt is still active.");
-  let score=0,total=0;
-  for(const q of a.quiz.questions){total+=q.marks;const answer=a.answers.find(x=>x.questionId===q.id);const selected=answer?.selectedOptionId;const correct=q.options.find(o=>o.isCorrect);if(selected&&correct&&selected===correct.id)score+=q.marks;else if(selected)score-=q.negativeMarks;}
-  const finalScore=Math.max(0,score);
-  return tx.attempt.update({where:{id:a.id},data:{score:finalScore,totalMarks:total,status:a.status==="IN_PROGRESS"?"EXPIRED":"FINALIZED",submittedAt:a.submittedAt??current,finalizedAt:current}});
- });
-}
+// Scoring/finalization lives in services/{scoring,attempts}.ts and is shared with the background worker.
+// submitAttempt locks the attempt row (FOR UPDATE), so concurrent submits/saves/worker runs are serialized and idempotent.
+// The response NEVER contains the score or marks: results are released only through GET /attempts/:id/result (after the quiz
+// closes and the attempt is finalized), the dashboard and performance endpoints, which all apply the same release rule.
+// Every outcome (fresh, repeated, late) answers {ok,finalized} so a retry or a second tab can never tell them apart.
 studentRouter.post("/attempts/:attemptId/submit",asyncHandler(async(req,res)=>{
  const attemptId=String(req.params.attemptId);
- const attempt=await prisma.attempt.findFirst({where:{id:attemptId,userId:req.auth!.userId},include:{quiz:true}});
- if(!attempt)throw new HttpError(404,"ATTEMPT_NOT_FOUND","Attempt not found.");
- if(attempt.finalizedAt){res.json({ok:true,finalized:true});return;}
- const current=now();
- if(attempt.status!=="IN_PROGRESS")throw new HttpError(409,"ATTEMPT_CLOSED","Attempt is already closed.");
- if(current<attempt.deadlineAt&&current<attempt.quiz.endsAt){
-  const result=await prisma.$transaction(async tx=>{
-   const a=await tx.attempt.findUniqueOrThrow({where:{id:attempt.id},include:{quiz:{include:{questions:{include:{options:true}}}},answers:true}});
-   let score=0,total=0;
-   for(const q of a.quiz.questions){total+=q.marks;const answer=a.answers.find(x=>x.questionId===q.id);const correct=q.options.find(o=>o.isCorrect);if(answer?.selectedOptionId&&correct&&answer.selectedOptionId===correct.id)score+=q.marks;else if(answer?.selectedOptionId)score-=q.negativeMarks;}
-   return tx.attempt.update({where:{id:a.id},data:{status:"SUBMITTED",submittedAt:current,finalizedAt:current,score:Math.max(0,score),totalMarks:total}});
-  });
-  res.json({ok:true,finalized:true,score:result.score});return;
+ if(!isUuid(attemptId))throw new HttpError(404,"ATTEMPT_NOT_FOUND","Attempt not found.");
+ const outcome=await submitAttempt(attemptId,req.auth!.userId);
+ switch(outcome.kind){
+  case "NOT_FOUND":throw new HttpError(404,"ATTEMPT_NOT_FOUND","Attempt not found.");
+  case "CLOSED_UNFINALIZED":throw new HttpError(409,"ATTEMPT_CLOSED","Attempt is already closed.");
+  case "ALREADY_FINALIZED":res.json({ok:true,finalized:true});return;
+  case "SUBMITTED":
+  case "EXPIRED":res.json({ok:true,finalized:true});return;
  }
- const result=await finalizeAttempt(attempt.id,req.auth!.userId);
- res.json({ok:true,finalized:!!result.finalizedAt});
+}));
+// Lightweight attempt status for the quiz page: lets a client re-sync its countdown to the database clock and learn that the
+// attempt ended (submitted in another tab, deadline passed, finalized by the worker). Ownership-checked; never returns scores.
+studentRouter.get("/attempts/:attemptId/status",asyncHandler(async(req,res)=>{
+ const attemptId=String(req.params.attemptId);
+ if(!isUuid(attemptId))throw new HttpError(404,"ATTEMPT_NOT_FOUND","Attempt not found.");
+ const status=await getAttemptStatus(attemptId,req.auth!.userId);
+ if(!status)throw new HttpError(404,"ATTEMPT_NOT_FOUND","Attempt not found.");
+ res.json(status);
 }));
 studentRouter.get("/attempts/:attemptId/result",asyncHandler(async(req,res)=>{
  const attemptId=String(req.params.attemptId);

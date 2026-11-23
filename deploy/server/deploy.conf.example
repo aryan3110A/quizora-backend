@@ -1,0 +1,18 @@
+# Non-secret settings for quizora-deploy.  Copy to ~/quizora/deploy.conf   (install.sh does this for you).
+# NEVER put passwords, tokens or keys in this file.
+
+# Which branch of each repository is "production". Automatic deployment follows these.
+BACKEND_BRANCH=main
+FRONTEND_BRANCH=main
+
+# false = the 5-minute timer does nothing (you deploy by hand with: quizora-deploy).  true = deploy automatically when CI is green.
+AUTO_DEPLOY=false
+
+# Deploy only commits whose GitHub Actions checks all passed. Leave true.
+REQUIRE_CI=true
+
+# GITHUB_OWNER=aryan3110A
+# BACKEND_REPO=quizora-backend
+# FRONTEND_REPO=quizora-frontend
+# HEALTH_TIMEOUT=150        # seconds to wait for the new version to become healthy before rolling back
+# MIN_FREE_MB=3000          # free disk space required before building
